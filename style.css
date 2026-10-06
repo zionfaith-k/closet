@@ -192,3 +192,19 @@ table.edit td:first-child input { min-width: 104px; }
 .steps { margin: 0 0 10px; padding-left: 20px; font-size: 13.5px; color: var(--ink-2); } .steps li { margin-bottom: 6px; }
 .intro .btn { margin-top: 12px; }
 table.edit td.ev { font-size: 12px; color: var(--muted); text-align: center; }
+
+/* 생애 기록 · 맞는 범위 · 계절 정리 */
+.grow { flex: 1; min-width: 0; }
+.toolbar { align-items: center; gap: 10px; }
+.badge.line { background: transparent; color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--muted); }
+.nudge { display: block; background: var(--ink); color: var(--on-ink); } .nudge b { display: block; font-size: 15px; } .nudge span { font-size: 12.5px; opacity: 0.75; }
+.fcrow { display: grid; grid-template-columns: 52px 62px 1fr; gap: 2px 8px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.fcrow span { color: var(--ink-2); font-size: 13px; } .fcrow em { font-style: normal; font-weight: 600; } .fcrow small { grid-column: 2 / -1; color: var(--muted); font-size: 11.5px; }
+.fcrow.ok em { color: var(--ok); } .fcrow.warn em, .fcrow.bad em { color: var(--point); }
+.feelline { display: flex; flex-wrap: wrap; gap: 6px; } .feelline span { background: var(--bg); border-radius: 999px; padding: 6px 12px; font-size: 13px; color: var(--ink-2); } .feelline .bad b { color: var(--point); } .feelline .ok b { color: var(--ok); }
+.alert { margin-top: 10px; font-size: 13px; color: var(--point); }
+.feelpick { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; } .feelpick span { width: 52px; font-size: 13px; color: var(--ink-2); } .feelpick .chip { padding: 8px 14px; }
+.dup { box-shadow: inset 0 0 0 1.5px var(--point); }
+.acts { display: flex; gap: 6px; margin-top: 8px; }
+.verdict { font-size: 13px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-2); } .verdict b { color: var(--ink); margin-right: 4px; } .verdict.sell b { color: var(--point); } .verdict.keep b { color: var(--ok); }
+.card h3 + .verdict { border-top: 0; margin-top: 0; padding-top: 0; }

@@ -282,7 +282,8 @@ export function recommend(items, looks, S, ctx) {
   const info = { base: r1(base), band, lo: r1(lo), hi: r1(hi), offset: fo.offset, feel: fo, swing, rainy };
 
   const ok = (i) => (!ctx.occasion || !i.occasion || i.occasion === '둘 다' || i.occasion === ctx.occasion)
-    && !(rainy && S.weather.rainAvoidWeaves.includes(i.weave));
+    && !(rainy && S.weather.rainAvoidWeaves.includes(i.weave))
+    && !(isShort(i, S) && base < R.shortAbove);
   const by = (c) => items.filter((i) => i.cat === c && ok(i));
   const tops = by('top'), bottoms = by('bottom'), shoes = by('shoes');
   const outerOk = by('outer').filter((o) => base < R.fillBelow || !o.fill || o.fill === '없음');
@@ -357,4 +358,175 @@ export function wearStats(itemId, looks, items) {
     tempRange: temps.length ? [Math.min(...temps), Math.max(...temps)] : null,
     feels: { hot: mine.filter((l) => l.feel === 'hot').length, ok: mine.filter((l) => l.feel === 'ok').length, cold: mine.filter((l) => l.feel === 'cold').length },
   };
+}
+
+// ---------- 입어 보니: 맞았던 실측 범위 ----------
+const TOP_F = [['shoulder', '어깨'], ['chest', '가슴'], ['sleeve', '소매'], ['length', '기장']];
+export const FEEL_PARTS = {
+  top: TOP_F, outer: TOP_F, inner: TOP_F,
+  bottom: [['waist', '허리'], ['hip', '엉덩이'], ['thigh', '허벅지'], ['rise', '밑위'], ['length', '기장']],
+  shoes: [],
+};
+export const FEEL_LABEL = { small: '작음', ok: '맞음', big: '큼' };
+const CIRC = { waist: 1, hip: 1, thigh: 1, chest: 1 }; // 둘레 부위 (단면 = 둘레의 절반)
+const BODY_PART = { waist: '허리둘레', hip: '엉덩이둘레', thigh: '허벅지둘레', chest: '가슴둘레', shoulder: '어깨너비' };
+
+export function isStretch(it, S) {
+  const pu = (it.materials || []).find((x) => /폴리우레탄|스판|엘라스/.test(x.name || ''));
+  const wv = S.weaves.find((w) => w.name === it.weave);
+  return !!((pu && pu.pct >= S.fit.stretchPct) || (wv && wv.group === '니트'));
+}
+
+// 비교에 쓰는 값. 신축성은 「작은 쪽」에만 여유를 준다(늘어나지만 줄지는 않으므로):
+// lo = 작은지 볼 때 쓰는 값(신축 여유 포함), hi = 큰지 볼 때 쓰는 값. 표시한 뒤 몸이 바뀌었으면 그만큼 옮긴다.
+function effVal(it, part, S, learning) {
+  let v = (it.m || {})[part];
+  if (!num(v)) return null;
+  if (learning && it.feelBody && BODY_PART[part] && num(it.feelBody[part]) && num(S.body[part])) {
+    v -= (it.feelBody[part] - S.body[part]) / (CIRC[part] ? 2 : 1);
+  }
+  const allow = CIRC[part] && isStretch(it, S) ? S.fit.stretchAllow : 0;
+  return { lo: r1(v + allow), hi: r1(v) };
+}
+
+export function comfortRanges(pool, S) {
+  const out = {};
+  for (const it of pool) {
+    if (!it.feel) continue;
+    const g = fitGroup(it.cat);
+    for (const [part, f] of Object.entries(it.feel)) {
+      const v = effVal(it, part, S, true);
+      if (v === null || !FEEL_LABEL[f]) continue;
+      const slot = ((out[g] ||= {})[part] ||= { okLo: [], okHi: [], small: [], big: [] });
+      if (f === 'ok') { slot.okLo.push(v.lo); slot.okHi.push(v.hi); } else if (f === 'small') slot.small.push(v.lo); else slot.big.push(v.hi);
+    }
+  }
+  for (const g of Object.values(out)) for (const s of Object.values(g)) {
+    s.n = s.okLo.length;
+    s.min = s.n ? Math.min(...s.okLo) : null; s.max = s.n ? Math.max(...s.okHi) : null;
+    if (s.n && s.min > s.max) s.min = s.max;
+    s.smallMax = s.small.length ? Math.max(...s.small) : null; s.bigMin = s.big.length ? Math.min(...s.big) : null;
+  }
+  return out;
+}
+
+// 이 옷의 부위별 실측을 「맞았던 범위」와 견준다. pool에는 처분한 옷도 넣는다(실패 기록도 근거).
+export function fitCheck(target, pool, S) {
+  const ranges = comfortRanges(pool.filter((p) => p.id !== target.id), S)[fitGroup(target.cat)] || {};
+  const tol = S.fit.rangeTol;
+  const rows = [];
+  for (const [part, name] of FEEL_PARTS[target.cat] || []) {
+    const v = effVal(target, part, S, false);
+    const r = ranges[part];
+    if (v === null || !r) continue;
+    let verdict = null, text = '';
+    if (r.n && v.lo >= r.min - tol && v.hi <= r.max + tol) { verdict = 'ok'; text = '맞았던 범위 안'; }
+    else if (r.smallMax !== null && v.lo <= r.smallMax + tol && (!r.n || v.lo < r.min)) { verdict = 'small'; text = '작았던 옷과 비슷하거나 더 작음'; }
+    else if (r.bigMin !== null && v.hi >= r.bigMin - tol && (!r.n || v.hi > r.max)) { verdict = 'big'; text = '컸던 옷과 비슷하거나 더 큼'; }
+    else if (r.n && v.lo < r.min) { verdict = 'maybeSmall'; text = `맞았던 옷보다 ${r1(r.min - v.lo)}cm 작음`; }
+    else if (r.n && v.hi > r.max) { verdict = 'maybeBig'; text = `맞았던 옷보다 ${r1(v.hi - r.max)}cm 큼`; }
+    else continue;
+    rows.push({ part, name, raw: target.m[part], stretch: v.lo !== v.hi, verdict, text, range: r });
+  }
+  return rows;
+}
+
+// 「입어 보니」를 표시한 뒤 몸 치수가 바뀐 부위
+export function bodyShift(it, S) {
+  const out = [];
+  if (!it.feel || !it.feelBody) return out;
+  for (const part of Object.keys(it.feel)) {
+    if (!BODY_PART[part] || !num(it.feelBody[part]) || !num(S.body[part])) continue;
+    const delta = r1(S.body[part] - it.feelBody[part]);
+    if (Math.abs(delta) >= S.fit.bodyChangeAlert) out.push({ part, name: BODY_PART[part], delta, was: it.feel[part] });
+  }
+  return out;
+}
+
+export function brandHistory(target, pool) {
+  const b = (target.brand || '').trim().toLowerCase();
+  if (!b) return [];
+  return pool.filter((p) => p.id !== target.id && (p.brand || '').trim().toLowerCase() === b && p.feel && Object.keys(p.feel).length && fitGroup(p.cat) === fitGroup(target.cat))
+    .map((p) => {
+      const bad = (FEEL_PARTS[p.cat] || []).filter(([k]) => p.feel[k] && p.feel[k] !== 'ok').map(([k, n]) => `${n} ${FEEL_LABEL[p.feel[k]]}`);
+      return { item: p, summary: bad.length ? bad.join(' · ') : '잘 맞음' };
+    });
+}
+
+// ---------- 비슷한 옷 알림 ----------
+const rgb = (hex) => { const h = (hex || '#888888').replace('#', ''); return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)); };
+export function duplicates(target, pool, S) {
+  const a = rgb(target.color);
+  const out = [];
+  for (const p of pool) {
+    if (p.id === target.id || p.cat !== target.cat) continue;
+    const b = rgb(p.color);
+    const cd = Math.sqrt(a.reduce((s, v, i) => s + (v - b[i]) ** 2, 0));
+    if (cd > S.dup.colorDist) continue;
+    const sim = similarByMeasure(target, [p], 1)[0];
+    if (sim ? sim.dist <= S.dup.measureDist : (target.weave && target.weave === p.weave)) out.push({ item: p, dist: sim ? r1(sim.dist) : null });
+  }
+  return out;
+}
+
+// ---------- 계절 정리 ----------
+export const bandIndex = (t, S) => { const i = S.bands.findIndex((b) => t >= b.min); return i < 0 ? S.bands.length - 1 : i; };
+
+// 옷마다, 내 옷장의 다른 옷과 조합했을 때 보온 목표에 들어올 수 있는 기온 구간을 구한다.
+export function usableBands(items, looks, S) {
+  const R = S.recommend, tol = S.season.bandTol, off = feelOffset(looks, S).offset;
+  const w = new Map(items.map((i) => [i.id, (warmthOf(i, S) || { score: 0 }).score]));
+  const by = (c) => items.filter((i) => i.cat === c);
+  const out = new Map(items.map((i) => [i.id, new Set()]));
+  S.bands.forEach((band, bi) => {
+    const rep = band.min > -50 ? band.min + 2 : (S.bands[bi - 1] ? S.bands[bi - 1].min - 3 : 0);
+    const lo = band.lo + off - tol, hi = band.hi + off + tol;
+    const shortOk = (i) => !(isShort(i, S) && rep < R.shortAbove);
+    const tops = by('top').filter(shortOk), bottoms = by('bottom').filter(shortOk);
+    const outers = rep >= R.noOuterAbove ? [null] : [null, ...by('outer').filter((o) => rep < R.fillBelow || !o.fill || o.fill === '없음')];
+    const inners = rep < R.innerBelow ? [null, ...by('inner')] : [null];
+    for (const t of tops) for (const b of bottoms) for (const o of outers) for (const n of inners) {
+      const total = w.get(t.id) + w.get(b.id) + (o ? w.get(o.id) : 0) + (n ? w.get(n.id) : 0);
+      if (total < lo || total > hi) continue;
+      for (const x of [t, b, o, n]) if (x) out.get(x.id).add(bi);
+    }
+  });
+  return out;
+}
+
+const monthsBetween = (a, b) => (Date.parse(b) - Date.parse(a)) / (864e5 * 30.44);
+
+// nextBases = 앞으로의 날짜별 기준 온도, yearDays = 지난 1년 [{date, base}] (없으면 null)
+export function seasonPlan(items, looks, S, nextBases, yearDays, today) {
+  const own = items.filter((i) => i.status !== 'gone');
+  const ub = usableBands(own, looks, S);
+  const now = new Set(nextBases.map((t) => bandIndex(t, S)));
+  const fits = (id) => [...ub.get(id)].some((b) => now.has(b));
+  const bandText = (id) => { const s = [...ub.get(id)].sort((a, b) => a - b); if (!s.length) return ''; const cold = S.bands[s[s.length - 1]]; return `${cold.min > -50 ? cold.min + '°' : '한겨울'}~${s[0] === 0 ? '한여름' : (S.bands[s[0] - 1].min - 1) + '°'}`; };
+  const takeOut = own.filter((i) => i.status === 'stored' && ub.get(i.id).size && fits(i.id)).map((i) => ({ item: i, range: bandText(i.id) }));
+  const putAway = own.filter((i) => (!i.status || i.status === 'active') && ub.get(i.id).size && !fits(i.id)).map((i) => ({ item: i, range: bandText(i.id) }));
+
+  const yearAgo = new Date(Date.parse(today) - 365 * 864e5).toISOString().slice(0, 10);
+  const review = [];
+  for (const i of own) {
+    const since = i.bought || (i.createdAt ? new Date(i.createdAt).toISOString().slice(0, 10) : null);
+    if (!since || monthsBetween(since, today) < S.season.reviewMonths) continue;
+    if (i.reviewedAt && monthsBetween(i.reviewedAt, today) < S.season.snoozeMonths) continue;
+    const mine = looks.filter((l) => l.itemIds.includes(i.id));
+    const wears = mine.filter((l) => l.date >= yearAgo).length;
+    if (wears > S.season.reviewMaxWears) continue;
+    const chance = yearDays && ub.get(i.id).size ? yearDays.filter((d) => ub.get(i.id).has(bandIndex(d.base, S))).length : null;
+    const badFit = (FEEL_PARTS[i.cat] || []).filter(([k]) => i.feel && i.feel[k] && i.feel[k] !== 'ok').map(([k, n]) => `${n} ${FEEL_LABEL[i.feel[k]]}`);
+    const shift = bodyShift(i, S);
+    const years = {};
+    for (const l of mine) years[l.date.slice(0, 4)] = (years[l.date.slice(0, 4)] || 0) + 1;
+    const reasons = [`${i.bought ? '구매' : '등록'} 후 ${Math.floor(monthsBetween(since, today))}개월`, `최근 1년 ${wears}회 입음`];
+    if (Object.keys(years).length) reasons.push(Object.entries(years).sort().map(([y, n]) => `${y}년 ${n}회`).join(' · '));
+    if (chance !== null) reasons.push(`이 옷에 맞는 기온이었던 날 ${chance}일`);
+    if (badFit.length) reasons.push(`입어 보니 ${badFit.join(' · ')}`);
+    for (const s of shift) reasons.push(`표시한 뒤 ${s.name} ${s.delta > 0 ? '+' : ''}${s.delta}cm`);
+    const verdict = badFit.length || shift.length ? 'sell' : chance !== null && chance < S.season.minChanceDays ? 'keep' : 'check';
+    review.push({ item: i, wears, chance, verdict, reasons });
+  }
+  return { takeOut, putAway, review };
 }

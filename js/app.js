@@ -15,13 +15,16 @@ const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 const fmtDate = (s) => { const d = new Date(s + 'T00:00:00'); return `${d.getMonth() + 1}월 ${d.getDate()}일 (${DOW[d.getDay()]})`; };
 const daysAgo = (s) => Math.round((Date.parse(today()) - Date.parse(s)) / 864e5);
 const agoText = (s) => { const n = daysAgo(s); return n <= 0 ? '오늘' : n === 1 ? '어제' : n < 60 ? `${n}일 전` : `${Math.round(n / 30)}달 전`; };
+const eun = (w) => ((w.charCodeAt(w.length - 1) - 0xac00) % 28 ? '은' : '는'); // 받침에 따라 은/는
 const nv = (v) => (v === '' || v == null ? null : Number(v));
 const go = (h) => { location.hash = h; };
 const S = () => store.S;
 const items = () => store.list('items');
+const owned = () => items().filter((i) => i.status !== 'gone');       // 처분하지 않은 옷
+const wearable = () => items().filter((i) => !i.status || i.status === 'active'); // 지금 입는 옷
 const looks = () => store.list('looks');
 
-const ui = { occasion: null, recPage: 0, closetCat: 'all', closetSort: 'new', lookFilter: 'all', weather: null, weatherErr: null, manual: null, open: new Set(['body']), loadingWeather: false };
+const ui = { occasion: null, recPage: 0, closetCat: 'all', closetSort: 'new', closetStatus: 'active', pos: undefined, next: null, lookFilter: 'all', weather: null, weatherErr: null, manual: null, open: new Set(['body']), loadingWeather: false };
 
 const FEEL = { hot: '더웠다', ok: '적당했다', cold: '추웠다' };
 const WMO = (c) => c == null ? '' : c === 0 ? '맑음' : c <= 2 ? '구름 조금' : c === 3 ? '흐림' : c <= 48 ? '안개' : c <= 57 ? '이슬비' : c <= 67 ? '비' : c <= 77 ? '눈' : c <= 82 ? '소나기' : c <= 86 ? '눈' : '뇌우';
@@ -43,7 +46,7 @@ function hydrate() {
   }
 }
 function fitBadges(it) {
-  const f = C.fitOf(it, S(), items());
+  const f = C.fitOf(it, S(), owned());
   return [f.main, f.shape, f.length].filter((a) => a && a.label).map((a) => `<span class="badge">${esc(a.label)}</span>`).join('');
 }
 function texBars(t, t2) {
@@ -120,6 +123,38 @@ function geo() {
     navigator.geolocation.getCurrentPosition((p) => res({ lat: p.coords.latitude, lon: p.coords.longitude }), rej, { timeout: 8000, maximumAge: 600000 });
   });
 }
+async function getPos() {
+  if (ui.pos === undefined) { try { ui.pos = await geo(); } catch { ui.pos = null; /* 권한이 없으면 기본 지역 */ } }
+  return ui.pos;
+}
+const placeOf = (pos) => pos || { lat: S().weather.region.lat, lon: S().weather.region.lon };
+// 날짜별 기준 온도(체감 최저·최고의 중간). 앞으로 n일 또는 지난 1년.
+async function fetchDaily(kind) {
+  const p = placeOf(await getPos());
+  const q = { latitude: p.lat.toFixed(3), longitude: p.lon.toFixed(3), daily: 'apparent_temperature_max,apparent_temperature_min', timezone: 'auto' };
+  let base = 'https://api.open-meteo.com/v1/forecast';
+  if (kind === 'next') q.forecast_days = Math.min(16, Math.max(1, S().season.horizonDays));
+  else {
+    const KEY = 'closet.wxyear.v1';
+    try { const c = JSON.parse(localStorage.getItem(KEY)); if (c && Date.now() - c.at < 7 * 864e5 && Math.abs(c.lat - p.lat) < 0.5) return c.days; } catch { /* 새로 받는다 */ }
+    base = 'https://archive-api.open-meteo.com/v1/archive';
+    q.start_date = ymd(new Date(Date.now() - 370 * 864e5)); q.end_date = ymd(new Date(Date.now() - 6 * 864e5));
+    const u = new URL(base); u.search = new URLSearchParams(q);
+    const r = await fetch(u); if (!r.ok) throw new Error('지난 날씨를 불러오지 못했습니다.');
+    const d = (await r.json()).daily;
+    const days = d.time.map((t, i) => ({ date: t, base: (d.apparent_temperature_max[i] + d.apparent_temperature_min[i]) / 2 })).filter((x) => !Number.isNaN(x.base));
+    try { localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), lat: p.lat, days })); } catch { /* 저장 공간 없음 */ }
+    return days;
+  }
+  const u = new URL(base); u.search = new URLSearchParams(q);
+  const r = await fetch(u); if (!r.ok) throw new Error('예보를 불러오지 못했습니다.');
+  const d = (await r.json()).daily;
+  return d.time.map((t, i) => ({ date: t, base: (d.apparent_temperature_max[i] + d.apparent_temperature_min[i]) / 2 })).filter((x) => !Number.isNaN(x.base));
+}
+async function loadNext() {
+  if (ui.next && Date.now() - ui.next.at < 3 * 3600e3) return ui.next.days;
+  const days = await fetchDaily('next'); ui.next = { at: Date.now(), days }; return days;
+}
 async function fetchWeather(lat, lon, date) {
   const W = S().weather, t = today(), d = date || t;
   const archive = daysAgo(d) > 80;
@@ -149,8 +184,7 @@ async function loadTodayWeather(force) {
   if (!force && ui.weather && Date.now() - ui.weather.at < 30 * 60e3 && ui.weather.date === today()) return;
   ui.loadingWeather = true; ui.weatherErr = null;
   try {
-    let pos = null;
-    try { pos = await geo(); } catch { /* 권한이 없으면 기본 지역 */ }
+    const pos = await getPos();
     const R = S().weather.region;
     const w = await fetchWeather(pos ? pos.lat : R.lat, pos ? pos.lon : R.lon, null);
     ui.weather = { ...w, place: pos ? '현재 위치' : `${R.name} (기본 지역)`, at: Date.now() };
@@ -161,7 +195,7 @@ async function loadTodayWeather(force) {
 async function weatherForDate(date) {
   const R = S().weather.region;
   let p = { lat: R.lat, lon: R.lon };
-  if (date === today()) { try { p = await geo(); } catch { /* 기본 지역 */ } }
+  if (date === today()) p = placeOf(await getPos());
   const w = await fetchWeather(p.lat, p.lon, date);
   return { tmin: w.tmin, tmax: w.tmax, rain: w.rain, code: w.code };
 }
@@ -193,7 +227,7 @@ function viewToday() {
   if (!items().length) {
     recHtml = empty('옷장이 비어 있어요', '옷을 등록하면 날씨에 맞는 조합을 골라 드립니다.', `<div class="btnrow center"><a class="btn" href="#/e/items/new">옷 등록하기</a><button class="btn ghost" id="sample">예시 데이터로 둘러보기</button></div>`);
   } else if (w) {
-    const rec = C.recommend(items(), looks(), S(), { tmin: w.tmin, tmax: w.tmax, rain: w.rain || 0, occasion: ui.occasion, today: today() });
+    const rec = C.recommend(wearable(), looks(), S(), { tmin: w.tmin, tmax: w.tmax, rain: w.rain || 0, occasion: ui.occasion, today: today() });
     const I = rec.info, n = S().recommend.count;
     const pages = Math.max(1, Math.ceil(rec.combos.length / n));
     const page = ui.recPage % pages;
@@ -214,7 +248,13 @@ function viewToday() {
         : empty('맞는 조합을 찾지 못했어요', esc(rec.reason || '옷을 더 등록하거나 상황을 바꿔 보세요.')));
     ui._combos = rec.combos;
   }
-  app.innerHTML = `<p class="dateline">${fmtDate(today())}</p>${weatherCard}${manual}${occ}${recHtml}`;
+  let seasonHtml = '';
+  if (owned().length && ui.next) {
+    const p = C.seasonPlan(items(), looks(), S(), ui.next.days.map((d) => d.base), null, today());
+    const n = p.takeOut.length + p.putAway.length;
+    if (n >= 3) seasonHtml = `<a class="card nudge" href="#/season"><b>옷장을 바꿀 때예요</b><span>앞으로 ${ui.next.days.length}일 기온 기준 · 꺼낼 옷 ${p.takeOut.length}벌 · 넣을 옷 ${p.putAway.length}벌</span></a>`;
+  } else if (owned().length && !ui.nextTried) { ui.nextTried = true; loadNext().then(() => { if (currentRoute() === 'today') render(); }).catch(() => {}); }
+  app.innerHTML = `<p class="dateline">${fmtDate(today())}</p>${weatherCard}${manual}${seasonHtml}${occ}${recHtml}`;
 
   $$('[data-occ]').forEach((b) => (b.onclick = () => { ui.occasion = b.dataset.occ; ui.recPage = 0; render(); }));
   $('#mset').onclick = () => { const a = nv($('#mmin').value), b = nv($('#mmax').value); if (a == null || b == null) return toast('최저와 최고를 모두 넣어 주세요.'); ui.manual = { tmin: Math.min(a, b), tmax: Math.max(a, b), rain: 0 }; ui.recPage = 0; render(); };
@@ -236,7 +276,7 @@ function addSamples() {
 // ---------- 옷장 ----------
 function viewCloset() {
   setHeader('옷장', false);
-  const all = items();
+  const all = ui.closetStatus === 'all' ? items() : items().filter((i) => (i.status || 'active') === ui.closetStatus);
   const last = new Map();
   for (const l of looks()) for (const id of l.itemIds) if (!last.has(id) || last.get(id) < l.date) last.set(id, l.date);
   let list = ui.closetCat === 'all' ? all : all.filter((i) => i.cat === ui.closetCat);
@@ -249,13 +289,17 @@ function viewCloset() {
     const lw = last.get(it.id);
     return `<a class="pin" href="#/d/items/${it.id}">${thumb(it, it.photo ? 'tall' : '')}
       <div class="pin-body"><div class="pin-name">${esc(it.name)}</div>
-      <div class="pin-sub">${fitBadges(it)}${w ? `<span class="badge soft">보온 ${w.score}</span>` : ''}</div>
+      <div class="pin-sub">${it.status === 'stored' ? '<span class="badge line">보관 중</span>' : it.status === 'gone' ? `<span class="badge line">${esc(it.goneHow || '처분')}</span>` : ''}${fitBadges(it)}${w ? `<span class="badge soft">보온 ${w.score}</span>` : ''}</div>
       <div class="pin-foot">${lw ? agoText(lw) + ' 입음' : '아직 안 입음'}</div></div></a>`;
   }).join('');
   app.innerHTML = `<div class="chips scroll">${chips}</div>
-    <div class="toolbar"><select id="sort"><option value="new">최근 등록 순</option><option value="old">오래 안 입은 순</option><option value="warm">보온 높은 순</option></select></div>
-    ${list.length ? `<div class="masonry">${cards}</div>` : empty('등록된 옷이 없어요', '쇼핑몰 상세페이지의 실측표와 소재를 보고 직접 넣어 주세요.', all.length ? '' : '<div class="btnrow center"><button class="btn ghost" id="sample">예시 데이터로 둘러보기</button></div>')}
+    <div class="toolbar"><a class="btn sm ghost" href="#/season">계절 정리</a><span class="grow"></span>
+      <select id="cstatus"><option value="active">입는 중</option><option value="stored">보관 중</option><option value="gone">처분함</option><option value="all">전체</option></select>
+      <select id="sort"><option value="new">최근 등록 순</option><option value="old">오래 안 입은 순</option><option value="warm">보온 높은 순</option></select></div>
+    ${list.length ? `<div class="masonry">${cards}</div>` : empty('등록된 옷이 없어요', '쇼핑몰 상세페이지의 실측표와 소재를 보고 직접 넣어 주세요.', items().length ? '' : '<div class="btnrow center"><button class="btn ghost" id="sample">예시 데이터로 둘러보기</button></div>')}
     <a class="fab" href="#/e/items/new" aria-label="옷 등록">＋</a>`;
+  $('#cstatus').value = ui.closetStatus;
+  $('#cstatus').onchange = (e) => { ui.closetStatus = e.target.value; render(); };
   $('#sort').value = ui.closetSort;
   $('#sort').onchange = (e) => { ui.closetSort = e.target.value; render(); };
   $$('[data-cat]').forEach((b) => (b.onclick = () => { ui.closetCat = b.dataset.cat; render(); }));
@@ -289,8 +333,27 @@ function viewDetail(kind, id) {
   if (!it) { app.innerHTML = empty('찾을 수 없어요', '지워졌거나 아직 이 기기에 내려받지 못한 항목입니다.'); return; }
   const cand = kind === 'candidates';
   setHeader(cand ? '구매 후보' : C.CAT_LABEL[it.cat], cand ? '#/compare' : '#/closet');
-  const pool = items();
+  const pool = owned();
   const f = C.fitOf(it, S(), pool);
+  const st = it.status || 'active';
+  const hasFeel = it.feel && Object.keys(it.feel).length > 0;
+  const fc = C.fitCheck(it, items(), S());
+  const VCLS = { ok: 'ok', small: 'bad', big: 'bad', maybeSmall: 'warn', maybeBig: 'warn' };
+  const good = fc.filter((r) => r.verdict === 'ok').map((r) => r.name), off = fc.filter((r) => r.verdict !== 'ok');
+  const fcHtml = fc.length ? `<section class="card"><h3>${hasFeel ? '다른 옷 기록과 견주면' : '나에게 맞을까'}</h3>
+      <p class="lead">${[good.length ? `${good.join('·')}${eun(good[good.length - 1])} 맞았던 범위 안` : '', ...off.map((r) => `${r.name}${eun(r.name)} ${r.verdict.toLowerCase().includes('small') ? '작을' : '클'} 가능성`)].filter(Boolean).join(', ')}</p>
+      ${fc.map((r) => `<div class="fcrow ${VCLS[r.verdict]}"><span>${r.name}</span><b>${r.raw}cm</b><em>${r.text}${r.stretch ? ' · 신축성 반영' : ''}</em>
+        <small>${r.range.n ? `맞았던 옷 ${r.range.n}벌 ${r.range.min}~${r.range.max}cm` : ''}${r.range.smallMax !== null ? ` · 작았던 옷 ${r.range.smallMax}cm 이하` : ''}${r.range.bigMin !== null ? ` · 컸던 옷 ${r.range.bigMin}cm 이상` : ''}</small></div>`).join('')}
+      <p class="muted small">옷마다 표시한 「입어 보니」 기록에서 나온 범위입니다. 확률이 아니라 실제로 맞았던 옷과의 비교입니다.</p></section>` : '';
+  const feelHtml = hasFeel ? `<section class="card"><h3>입어 보니</h3><div class="feelline">${(C.FEEL_PARTS[it.cat] || []).filter(([k]) => it.feel[k]).map(([k, n]) => `<span class="${it.feel[k] === 'ok' ? 'ok' : 'bad'}">${n} <b>${C.FEEL_LABEL[it.feel[k]]}</b></span>`).join('')}</div>
+      ${C.bodyShift(it, S()).map((s) => `<p class="alert">표시한 뒤 ${s.name}가 ${s.delta > 0 ? '+' : ''}${s.delta}cm 바뀌었어요. 지금은 ${s.delta < 0 ? '클' : '작을'} 수 있습니다.</p>`).join('')}</section>` : '';
+  const bh = C.brandHistory(it, items());
+  const brandHtml = bh.length ? `<section class="card"><h3>${esc(it.brand)}의 다른 옷</h3>${bh.map((b) => `<a class="simrow" href="#/d/items/${b.item.id}">${thumb(b.item)}<div><b>${esc(b.item.name)}${b.item.size ? ' · ' + esc(b.item.size) : ''}</b><div class="diffs"><span>${esc(b.summary)}</span></div></div></a>`).join('')}</section>` : '';
+  const dups = C.duplicates(it, pool, S());
+  const dupHtml = dups.length ? `<section class="card dup"><h3>비슷한 옷이 이미 있어요</h3>${dups.map((d) => `<a class="simrow" href="#/d/items/${d.item.id}">${thumb(d.item)}<div><b>${esc(d.item.name)}</b><div class="diffs"><span>색이 가깝고 ${d.dist !== null ? `실측 차이 평균 ${d.dist}cm` : '조직이 같음'}</span></div></div></a>`).join('')}</section>` : '';
+  const statusHtml = cand ? '' : `<section class="card"><h3>지금 이 옷은</h3><div class="chips">${[['active', '입는 중'], ['stored', '계절 보관'], ['gone', '처분함']].map(([k, t]) => `<button class="chip ${st === k ? 'on' : ''}" data-status="${k}">${t}</button>`).join('')}</div>
+      ${st === 'gone' ? `<div class="chips">${['판매', '기부', '버림'].map((h) => `<button class="chip ${it.goneHow === h ? 'on' : ''}" data-gone="${h}">${h}</button>`).join('')}</div><p class="muted small">처분한 옷도 기록은 남아 핏 판정의 근거로 계속 쓰입니다.</p>` : ''}
+      ${st === 'stored' ? '<p class="muted small">보관 중인 옷은 추천에 나오지 않습니다.</p>' : ''}${it.statusAt ? `<p class="muted small">${fmtDate(it.statusAt)}에 바꿈</p>` : ''}</section>`;
   const w = C.warmthOf(it, S());
   const ease = C.easeOf(it, S());
   const easeName = { chest: '가슴', shoulder: '어깨', waist: '허리', hip: '엉덩이', thigh: '허벅지' };
@@ -330,14 +393,17 @@ function viewDetail(kind, id) {
       ${it.memo ? `<p>${esc(it.memo)}</p>` : ''}</section>
     ${f.main || f.shape || f.length ? `<section class="card"><h3>핏</h3>${fitBlock(it, f.main)}${fitBlock(it, f.shape)}${fitBlock(it, f.length)}
       ${f.reach ? `<p class="reach">내 몸에서는 <b>${f.reach}</b> <span class="muted small">(키 비율로 어림한 값)</span></p>` : ''}</section>` : ''}
+    ${cand ? dupHtml : ''}${feelHtml}${fcHtml}${brandHtml}
     ${mrows ? `<section class="card"><h3>실측</h3><table class="mtable">${mrows}</table></section>` : ''}
     ${simHtml}
     ${w ? `<section class="card"><h3>보온</h3><div class="warm"><b>${w.score}</b><span>점</span></div>
       <p class="muted small">소재 ${w.base}${w.known ? '' : '(소재 미입력)'} × 두께 ${w.thick} × 조직 ${w.weave}${w.fill ? ` + 충전재 ${w.fill}` : ''}${w.short !== 1 ? ` × 반팔·반바지 ${w.short}` : ''}</p></section>` : ''}
-    ${tex}${history}
+    ${tex}${history}${statusHtml}
     ${cand ? `<button class="btn full" id="buy">샀어요 · 옷장으로 옮기기</button>` : ''}
     <div class="btnrow"><a class="btn ghost" href="#/e/${kind}/${it.id}">고치기</a><button class="btn ghost danger" id="del">지우기</button></div>`;
   $('#del').onclick = () => { if (!confirm('지울까요?')) return; if (it.photo) dropPhoto(it.photo); store.remove(kind, id); go(cand ? '#/compare' : '#/closet'); };
+  $$('[data-status]').forEach((b) => (b.onclick = () => { it.status = b.dataset.status; it.statusAt = today(); if (it.status !== 'gone') delete it.goneHow; store.upsert(kind, it); render(); }));
+  $$('[data-gone]').forEach((b) => (b.onclick = () => { it.goneHow = b.dataset.gone; store.upsert(kind, it); render(); }));
   if ($('#buy')) $('#buy').onclick = () => {
     const moved = { ...it, id: store.newId(), createdAt: Date.now(), bought: today() };
     delete moved.url; delete moved.price;
@@ -353,7 +419,7 @@ function viewEdit(kind, id) {
   if (!base) { app.innerHTML = empty('찾을 수 없어요', ''); return; }
   const it = JSON.parse(JSON.stringify(base));
   let famTouched = !isNew;
-  let newPhoto = null;
+  let newPhoto = null, feelTouched = false;
   setHeader(isNew ? (cand ? '구매 후보 넣기' : '옷 등록') : '고치기', true);
   const cats = cand ? ['top', 'bottom', 'outer'] : C.CATS;
 
@@ -383,6 +449,8 @@ function viewEdit(kind, id) {
         <div class="row2"><label>두께<select name="thickness">${Object.keys(S().thickness).map((x) => `<option ${it.thickness === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
         ${it.cat === 'outer' ? `<label>충전재<select name="fill">${Object.keys(S().fill).map((x) => `<option ${it.fill === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>` : '<span></span>'}</div>
       </section>
+      ${it.cat === 'shoes' || cand ? '' : `<section class="card"><h3>입어 보니 <span class="muted small">부위별로 한 번만 표시 · 새 옷을 가늠하는 근거가 됩니다</span></h3>
+        ${C.FEEL_PARTS[it.cat].map(([k, n]) => `<div class="feelpick"><span>${n}</span>${Object.entries(C.FEEL_LABEL).map(([v, t]) => `<button type="button" class="chip ${(it.feel || {})[k] === v ? 'on' : ''}" data-feelpart="${k}" data-feelval="${v}">${t}</button>`).join('')}</div>`).join('')}</section>`}
       ${it.cat === 'shoes' || cand ? '' : `<section class="card"><h3>내가 느끼는 핏 <span class="muted small">표시하면 새 옷을 가늠하는 기준점이 됩니다</span></h3>
         <label>${axisTitle('main', it.cat)}${sel('main', mainStages)}</label>
         ${it.cat === 'bottom' ? `<label>형태${sel('shape', F.bottomShape.stages)}</label>` : ''}
@@ -406,7 +474,13 @@ function viewEdit(kind, id) {
   const bind = () => {
     const f = $('#f');
     sum();
-    f.elements.cat.onchange = () => { read(); it.m = {}; it.fitLabel = {}; draw(); };
+    f.elements.cat.onchange = () => { read(); it.m = {}; it.fitLabel = {}; it.feel = {}; draw(); };
+    $$('[data-feelpart]', f).forEach((b) => (b.onclick = () => {
+      read(); it.feel = it.feel || {};
+      const k = b.dataset.feelpart;
+      if (it.feel[k] === b.dataset.feelval) delete it.feel[k]; else it.feel[k] = b.dataset.feelval;
+      feelTouched = true; const y = window.scrollY; draw(); window.scrollTo(0, y);
+    }));
     f.elements.color.oninput = (e) => { if (!famTouched) f.elements.colorFamily.value = C.guessFamily(e.target.value); };
     f.elements.colorFamily.onchange = () => { famTouched = true; };
     $('#matadd').onclick = () => { read(); it.materials.push({ name: '', pct: 0 }); draw(); };
@@ -416,6 +490,11 @@ function viewEdit(kind, id) {
     f.onsubmit = async (e) => {
       e.preventDefault(); read();
       it.materials = it.materials.filter((x) => x.name);
+      if (feelTouched) it.feelBody = { ...S().body }; // 표시할 때의 몸 치수를 함께 적어 둔다
+      if (isNew) {
+        const dups = C.duplicates(it, owned(), S());
+        if (dups.length && !confirm(`비슷한 옷이 이미 있습니다: ${dups.map((d) => d.item.name).join(', ')}\n그래도 저장할까요?`)) return;
+      }
       try {
         if (newPhoto) { const old = it.photo; it.photo = (await savePhoto('i' + it.id, newPhoto)).key; if (old) dropPhoto(old); }
       } catch (err) { return toast(err.message); }
@@ -488,7 +567,7 @@ function viewLookEdit(id) {
   const removed = [];
   setHeader(isNew ? '룩 기록' : '룩 고치기', true);
   const draw = () => {
-    const pool = items().filter((i) => i.cat === pickCat);
+    const pool = items().filter((i) => i.cat === pickCat && (i.status !== 'gone' || l.itemIds.includes(i.id)));
     app.innerHTML = `<form id="f" class="form">
       <section class="card"><h3>사진 <span class="muted small">최대 3장 · 없어도 됩니다</span></h3>
         <div class="minis">${l.photos.map((p, i) => `<div class="mini"><div class="thumb"><img data-photo="${esc(p)}_t" alt=""></div><button type="button" class="btn sm ghost" data-pdel="${i}">빼기</button></div>`).join('')}</div>
@@ -531,6 +610,36 @@ function viewLookEdit(id) {
   draw();
 }
 
+// ---------- 계절 정리 ----------
+async function viewSeason() {
+  setHeader('계절 정리', '#/closet');
+  app.innerHTML = '<p class="muted pagehint">앞으로의 기온과 지난 1년 날씨를 불러오는 중…</p>';
+  let next, year = null;
+  try { next = await loadNext(); } catch (e) { app.innerHTML = empty('예보를 불러오지 못했어요', esc(e.message)); return; }
+  try { year = await fetchDaily('year'); } catch { /* 지난 날씨가 없으면 기회 일수 없이 판단 */ }
+  if (currentRoute() !== 'season') return;
+  const bases = next.map((d) => d.base);
+  const p = C.seasonPlan(items(), looks(), S(), bases, year, today());
+  const row = (x, acts) => `<div class="simrow">${thumb(x.item)}<div class="grow"><a href="#/d/items/${x.item.id}"><b>${esc(x.item.name)}</b></a>
+      <div class="diffs">${(x.reasons || [x.range ? `입기 좋은 기온 ${x.range}` : '']).filter(Boolean).map((r) => `<span>${esc(r)}</span>`).join('')}</div>
+      <div class="acts">${acts}</div></div></div>`;
+  const VERD = { keep: ['유지 추천', '입을 기회가 적었어요.'], sell: ['처분 추천', '지금 몸에 맞지 않을 가능성이 있어요.'], check: ['처분 검토', '기회는 있었는데 거의 입지 않았어요.'] };
+  app.innerHTML = `<section class="card"><div class="basis-row"><span>앞으로 ${next.length}일 기준 온도</span><b>${Math.round(Math.min(...bases))}° ~ ${Math.round(Math.max(...bases))}°</b></div>
+      <p class="muted small">달력이 아니라 실제 예보로 판단합니다. 옷마다 「내 옷장의 다른 옷과 입었을 때 보온 목표에 들어오는 기온」을 계산해 견줍니다.</p></section>
+    <section class="card"><h3>꺼낼 옷 <span class="muted small">${p.takeOut.length}벌</span></h3>
+      ${p.takeOut.length ? p.takeOut.map((x) => row(x, `<button class="btn sm" data-act="active" data-id="${x.item.id}">꺼냈어요</button>`)).join('') + (p.takeOut.length > 1 ? '<button class="btn sm ghost full" data-all="active">모두 꺼냈어요</button>' : '') : '<p class="muted small">보관 중인 옷 가운데 지금 기온에 맞는 것이 없습니다.</p>'}</section>
+    <section class="card"><h3>넣을 옷 <span class="muted small">${p.putAway.length}벌</span></h3>
+      ${p.putAway.length ? p.putAway.map((x) => row(x, `<button class="btn sm" data-act="stored" data-id="${x.item.id}">보관했어요</button>`)).join('') + (p.putAway.length > 1 ? '<button class="btn sm ghost full" data-all="stored">모두 보관했어요</button>' : '') : '<p class="muted small">지금 입는 옷은 모두 앞으로의 기온에 맞습니다.</p>'}</section>
+    <section class="card"><h3>처분 검토 <span class="muted small">${p.review.length}벌</span></h3>
+      ${p.review.length ? p.review.map((x) => `<div class="verdict ${x.verdict}"><b>${VERD[x.verdict][0]}</b> ${VERD[x.verdict][1]}</div>` + row(x, `<button class="btn sm ghost" data-keep="${x.item.id}">유지</button><button class="btn sm ghost danger" data-act="gone" data-id="${x.item.id}">처분</button>`)).join('')
+        : `<p class="muted small">보유한 지 ${S().season.reviewMonths}개월이 넘고 최근 1년에 ${S().season.reviewMaxWears}회 이하로 입은 옷이 없습니다.${year ? '' : ' (지난 날씨를 불러오지 못해 기회 일수는 빼고 봤습니다.)'}</p>`}</section>`;
+  hydrate();
+  const set = (id, status) => { const it = store.get('items', id); if (!it) return; it.status = status; it.statusAt = today(); store.upsert('items', it); };
+  $$('[data-act]').forEach((b) => (b.onclick = () => { set(b.dataset.id, b.dataset.act); if (b.dataset.act === 'gone') return go(`#/d/items/${b.dataset.id}`); render(); }));
+  $$('[data-all]').forEach((b) => (b.onclick = () => { (b.dataset.all === 'active' ? p.takeOut : p.putAway).forEach((x) => set(x.item.id, b.dataset.all)); render(); }));
+  $$('[data-keep]').forEach((b) => (b.onclick = () => { const it = store.get('items', b.dataset.keep); it.reviewedAt = today(); store.upsert('items', it); toast(`${S().season.snoozeMonths}개월 동안 다시 묻지 않을게요.`); render(); }));
+}
+
 // ---------- 기준 설정 ----------
 function getPath(o, p) { return p.split('.').reduce((a, k) => (a == null ? a : a[k]), o); }
 function setPath(o, p, v) { const ks = p.split('.'); const last = ks.pop(); const t = ks.reduce((a, k) => a[k], o); t[last] = v; }
@@ -557,7 +666,8 @@ function viewSettings() {
   const hasSample = [...store.list('items'), ...store.list('looks')].some((x) => x.sample);
   app.innerHTML = `<p class="muted pagehint">여기서 고친 값은 바로 판정과 추천에 반영됩니다.</p>
     ${sec('conn', '저장 연결', `<p class="muted small">${store.connected ? `비공개 저장소 <b>${esc(store.conn.owner)}/${esc(store.conn.repo)}</b>에 저장하고 있습니다.` : '지금은 이 기기에만 저장됩니다. 접근 키를 넣으면 비공개 저장소에 보관됩니다.'}</p><a class="btn ghost full" href="#/connect">연결 설정 열기</a>`)}
-    ${sec('body', '내 몸', `<div class="grid2">${bodyF.map(([k, n]) => `<label>${n}${inp('body.' + k, 'num', 'placeholder="cm"')}</label>`).join('')}</div>`, '넣은 항목만큼 「내 몸보다 몇 cm 여유」가 표시됩니다.')}
+    ${sec('body', '내 몸', `<div class="grid2">${bodyF.map(([k, n]) => `<label>${n}${inp('body.' + k, 'num', 'placeholder="cm"')}</label>`).join('')}</div>
+      ${(s.bodyLog || []).length ? `<h4>바꾼 기록</h4>${s.bodyLog.slice(-5).reverse().map((b) => `<p class="muted small">${b.date} · ${bodyF.filter(([k]) => b[k] != null).map(([k, n]) => `${n} ${b[k]}`).join(' · ')}</p>`).join('')}` : ''}`, '넣은 항목만큼 「내 몸보다 몇 cm 여유」가 표시됩니다.')}
     ${sec('fit', '핏 단계와 경계값', `
       <h4>단계 이름</h4>
       <label>상의·이너<div class="stagerow">${stageInputs('fit.top.stages')}</div></label>
@@ -580,12 +690,24 @@ function viewSettings() {
       ${boundsRow('하의 기장 — 총장', 'fit.length.stages', 'fit.length.bottomAbs', 'cm')}
       <h4>반팔·반바지</h4><div class="grid3"><label>반팔 소매 기준${inp('fit.shortSleeve')}</label><label>반바지 총장 기준${inp('fit.shortPants')}</label><label>보온 계수${inp('fit.shortCoef')}</label></div>`,
       '경계값은 비워 두었습니다. 직접 넣거나, 옷에 핏을 표시해 이웃한 두 단계에 옷이 생기면 그 사이가 경계로 쓰입니다.')}
+    ${sec('range', '나에게 맞는 범위', (() => {
+      const R = C.comfortRanges(items(), s);
+      const rows = [['top', '상의·이너'], ['outer', '아우터'], ['bottom', '하의']].flatMap(([g, gn]) => (C.FEEL_PARTS[g] || []).filter(([k]) => R[g] && R[g][k]).map(([k, n]) => { const r = R[g][k]; return `<tr><th>${gn} ${n}</th><td>${r.n ? `${r.min}~${r.max}cm <span class="muted small">(${r.n}벌)</span>` : '—'}</td><td class="muted">${[r.smallMax !== null ? `작음 ≤${r.smallMax}` : '', r.bigMin !== null ? `큼 ≥${r.bigMin}` : ''].filter(Boolean).join(' · ')}</td></tr>`; }));
+      return (rows.length ? `<table class="mtable">${rows.join('')}</table>` : '<p class="muted small">아직 「입어 보니」를 표시한 옷이 없습니다. 옷을 고칠 때 부위별로 작음·맞음·큼을 표시하면 여기에 범위가 생깁니다.</p>')
+        + `<h4>계산 방식</h4><div class="grid2"><label>신축성으로 보는 폴리우레탄 %${inp('fit.stretchPct')}</label><label>신축성 여유(cm)${inp('fit.stretchAllow')}</label>
+          <label>범위 허용 오차(cm)${inp('fit.rangeTol')}</label><label>몸 변화 알림 기준(cm)${inp('fit.bodyChangeAlert')}</label></div>`;
+    })(), '옷마다 표시한 「입어 보니」에서 자동으로 나옵니다. 처분한 옷의 기록도 포함합니다. 단면 기준이며, 표시한 뒤 몸 치수가 바뀌었으면 그만큼 옮겨서 계산합니다.')}
+    ${sec('season', '계절 정리와 비슷한 옷 알림', `<div class="grid2">
+      <label>예보를 보는 날 수${inp('season.horizonDays')}</label><label>보온 목표 허용 오차${inp('season.bandTol')}</label>
+      <label>처분 검토: 보유 개월${inp('season.reviewMonths')}</label><label>처분 검토: 1년 착용 이하${inp('season.reviewMaxWears')}</label>
+      <label>기회가 적었다고 보는 일수${inp('season.minChanceDays')}</label><label>유지 후 다시 묻는 개월${inp('season.snoozeMonths')}</label>
+      <label>비슷한 옷: 색 차이 한도${inp('dup.colorDist')}</label><label>비슷한 옷: 실측 차이 한도(cm)${inp('dup.measureDist')}</label></div>`)}
     ${sec('weather', '날씨와 추천', `<div class="grid2">
       <label>활동 시작 시각${inp('weather.startHour')}</label><label>활동 끝 시각${inp('weather.endHour')}</label>
       <label>겉옷을 넣는 일교차${inp('weather.diurnal')}</label><label>비 대비 강수확률(%)${inp('weather.rainProb')}</label>
       <label>추천 개수${inp('recommend.count')}</label><label>최근 며칠 입은 조합 제외${inp('recommend.excludeDays')}</label>
       <label>이 기온 이상이면 아우터 없이${inp('recommend.noOuterAbove')}</label><label>이 기온 미만이면 이너 사용${inp('recommend.innerBelow')}</label>
-      <label>이 기온 미만이면 솜·다운 사용${inp('recommend.fillBelow')}</label><span></span>
+      <label>이 기온 미만이면 솜·다운 사용${inp('recommend.fillBelow')}</label><label>이 기온 이상이면 반팔·반바지 사용${inp('recommend.shortAbove')}</label>
       <label>체감 1건당 목표 이동${inp('recommend.feelStep')}</label><label>좋아요 조합 가산${inp('recommend.likeBonus')}</label></div>
       <label>비 오는 날 빼는 조직 <span class="muted small">쉼표로 구분</span>${inp('weather.rainAvoidWeaves', 'list')}</label>
       <h4>기본 지역 <span class="muted small">위치 권한이 없을 때</span></h4><div class="grid3"><label>이름${inp('weather.region.name', 'str')}</label><label>위도${inp('weather.region.lat')}</label><label>경도${inp('weather.region.lon')}</label></div>
@@ -610,7 +732,9 @@ function viewSettings() {
   $$('[data-p]').forEach((el) => (el.onchange = () => {
     const t = el.dataset.t;
     const v = t === 'num' ? nv(el.value) : t === 'list' ? el.value.split(',').map((x) => x.trim()).filter(Boolean) : el.value;
-    setPath(S(), el.dataset.p, v); store.saveSettings(); toast('반영했어요.');
+    setPath(S(), el.dataset.p, v);
+    if (el.dataset.p.startsWith('body.')) { const log = (S().bodyLog ||= []); const e = { date: today(), ...S().body }; if (log.length && log[log.length - 1].date === e.date) log[log.length - 1] = e; else log.push(e); }
+    store.saveSettings(); toast('반영했어요.');
   }));
   const blank = { bands: { min: 0, label: '', lo: 0, hi: 0 }, materials: { name: '', warmth: 2.5, d: [0, 0, 0, 0] }, weaves: { name: '', group: '기타', warmth: 1, tex: [2.5, 1.5, 2.5, 2.5], pattern: 'plain' } };
   $$('[data-add]').forEach((b) => (b.onclick = () => { S()[b.dataset.add].push(JSON.parse(JSON.stringify(blank[b.dataset.add]))); store.saveSettings(); render(); }));
@@ -647,14 +771,14 @@ function viewConnect() {
 }
 
 // ---------- 라우팅 ----------
-const TABS = { today: 'today', closet: 'closet', d: 'closet', e: 'closet', compare: 'compare', looks: 'looks', look: 'looks', le: 'looks', settings: 'settings', connect: 'settings' };
+const TABS = { today: 'today', closet: 'closet', d: 'closet', e: 'closet', compare: 'compare', looks: 'looks', look: 'looks', le: 'looks', settings: 'settings', connect: 'settings', season: 'closet' };
 function parts() { return location.hash.replace(/^#\/?/, '').split('/').filter(Boolean); }
 function currentRoute() { return parts()[0] || 'today'; }
 function render() {
   const [r = 'today', a, b] = parts();
   const tab = r === 'd' || r === 'e' ? (a === 'candidates' ? 'compare' : 'closet') : TABS[r] || 'today';
   $$('#nav a').forEach((n) => n.classList.toggle('on', n.dataset.tab === tab));
-  const views = { today: viewToday, closet: viewCloset, compare: viewCompare, looks: viewLooks, settings: viewSettings, connect: viewConnect,
+  const views = { today: viewToday, closet: viewCloset, compare: viewCompare, looks: viewLooks, settings: viewSettings, connect: viewConnect, season: viewSeason,
     d: () => viewDetail(a, b), e: () => viewEdit(a, b), look: () => viewLook(a), le: () => viewLookEdit(a) };
   (views[r] || viewToday)();
   hydrate();

@@ -26,6 +26,11 @@ export const DEFAULT_SETTINGS = {
     shortSleeve: 35, // 소매길이가 이보다 짧으면 반팔
     shortPants: 65,  // 하의 총장이 이보다 짧으면 반바지
     shortCoef: 0.7,  // 반팔·반바지의 보온 계수
+    // 「입어 보니」 기록으로 맞는 범위를 잡을 때
+    stretchPct: 3,       // 폴리우레탄이 이 % 이상이거나 니트 조직이면 신축성 있는 옷으로 본다
+    stretchAllow: 2,     // 신축성 있는 옷의 둘레 부위(가슴·허리·엉덩이·허벅지)는 단면을 이만큼 더 넉넉하게 본다 (cm)
+    rangeTol: 0.5,       // 맞았던 범위에서 이만큼 벗어나는 것까지는 범위 안으로 본다 (cm)
+    bodyChangeAlert: 2,  // 표시했을 때보다 몸 치수가 이만큼 바뀌면 알린다 (cm)
   },
 
   // 소재: 보온 기본점수 + 질감 보정 [표면감, 광택, 드레이프, 두께감] (100%일 때 더해지는 값)
@@ -99,11 +104,25 @@ export const DEFAULT_SETTINGS = {
     noOuterAbove: 23,   // 기준 온도가 이 이상이면 아우터 없이
     innerBelow: 12,     // 기준 온도가 이 미만일 때만 이너 사용
     fillBelow: 10,      // 솜·다운 아우터는 기준 온도가 이 미만일 때만
+    shortAbove: 20,     // 반팔·반바지는 기준 온도가 이 이상일 때만
     feelStep: 0.25,     // 「추웠다」 1건당 목표 점수 이동
     feelWindow: 30,     // 최근 몇 건의 체감 기록을 볼지
     feelMax: 3,
     likeBonus: 0.6,     // 좋아요 룩에 함께 나온 옷 쌍 1개당 가산
   },
+
+  // 계절 정리: 달력이 아니라 앞으로의 기온으로 판단한다
+  season: {
+    horizonDays: 14,    // 앞으로 며칠의 예보를 볼지
+    bandTol: 1,         // 보온 합계가 목표에서 이만큼 벗어나도 입을 수 있는 것으로 본다
+    reviewMonths: 12,   // 보유한 지 이 개월이 지난 옷만 처분 검토
+    reviewMaxWears: 1,  // 최근 1년 착용이 이 횟수 이하면 처분 검토
+    minChanceDays: 20,  // 그 옷에 맞는 기온이었던 날이 이보다 적었으면 「기회가 적었음」으로 유지
+    snoozeMonths: 6,    // 「유지」를 누르면 이 개월 동안 다시 묻지 않는다
+  },
+  // 등록할 때 비슷한 옷 알림
+  dup: { colorDist: 60, measureDist: 1.5 },
+  bodyLog: [],          // 신체 치수를 바꾼 날짜별 기록
 
   color: { maxChromatic: 1, clashPenalty: 3, toneOnToneBonus: 1 },
   occasions: ['출근', '주말'],
