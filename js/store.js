@@ -126,7 +126,7 @@ export const store = {
   // ---------- GitHub ----------
   gh(path, opt = {}) {
     const { owner, repo, token } = this.conn;
-    return fetch(`https://api.github.com/repos/${owner}/${repo}/${path}`, {
+    return fetch(`https://api.github.com/repos/${owner}/${repo}${path ? '/' + path : ''}`, {
       cache: 'no-store', ...opt,
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(opt.headers || {}) },
     });
